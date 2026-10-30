@@ -278,36 +278,42 @@ function parseSheet(rows) {
 }
 
 /* ---------- loading ---------- */
+function apply(idx, data) {
+  if (idx !== termIdx) return;
+  exams = data; index();
+  $("status").className = "status";
+  $("status").textContent = byCourse.size ? "" : `No exam schedule is published for ${SHEETS[idx][0]} yet.`;
+  picks = picks.filter(p => byCourse.has(p.course));
+  render();
+}
 async function loadTerm(idx) {
   const [name, gid] = SHEETS[idx];
   const key = "fsm-cache-" + gid;
-  $("status").className = "status";
-  $("status").textContent = "Loading exam data…";
-  let data = null, stale = false;
+  // 1. show what we already have straight away (last live copy, else the built-in snapshot)
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem(key)); } catch (e) {}
+  if (!local && SNAPSHOT[gid]) local = SNAPSHOT[gid].map(([course, code, section, date, start, end, room]) => ({ course, code, section, date, start, end, room }));
+  if (local && local.length) apply(idx, local);
+  else { $("status").className = "status"; $("status").textContent = "Loading exam data…"; }
+  // 2. refresh from the live sheet in the background (some browsers hang on this request, so time it out)
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = setTimeout(() => ctl && ctl.abort(), 8000);
   try {
-    const res = await fetch(`${PUB}?gid=${gid}&single=true&output=csv`);
+    const res = await fetch(`${PUB}?gid=${gid}&single=true&output=csv`, ctl ? { signal: ctl.signal } : {});
     if (!res.ok) throw new Error(res.status);
-    data = parseSheet(parseCSV(await res.text()));
-    try { localStorage.setItem(key, JSON.stringify(data)); } catch (e) {}
-  } catch (e) {
-    try { data = JSON.parse(localStorage.getItem(key)); stale = !!data; } catch (e2) {}
-    if (!data && SNAPSHOT[gid]) {
-      data = SNAPSHOT[gid].map(([course, code, section, date, start, end, room]) => ({ course, code, section, date, start, end, room }));
-      stale = true;
+    const live = parseSheet(parseCSV(await res.text()));
+    if (live.length) {
+      try { localStorage.setItem(key, JSON.stringify(live)); } catch (e) {}
+      apply(idx, live);
     }
-  }
-  if (!data) {
-    exams = []; index();
-    $("status").className = "status err";
-    $("status").textContent = "Couldn't load the exam sheet. Check your connection and reload.";
-    render(); return;
-  }
-  exams = data; index();
-  const n = byCourse.size;
-  $("status").textContent = n ? "" :
-    `No exam schedule is published for ${name} yet.`;
-  picks = picks.filter(p => byCourse.has(p.course));
-  render();
+  } catch (e) {
+    if (!(local && local.length)) {
+      exams = []; index();
+      $("status").className = "status err";
+      $("status").textContent = "Couldn't load the exam sheet. Check your connection and reload.";
+      render();
+    }
+  } finally { clearTimeout(timer); }
 }
 function index() {
   byCourse = new Map();
@@ -453,9 +459,18 @@ function download(name, url) { const a = document.createElement("a"); a.href = u
 $("png").onclick = async () => {
   if (!window.html2canvas) { alert("Image export library failed to load. Take a screenshot of the schedule instead."); return; }
   try { await document.fonts.ready; } catch (e) {}
-  const canvas = await html2canvas($("sheet"), { scale: 2, backgroundColor: null,
+  const canvas = await html2canvas($("sheet"), { scale: window.innerWidth < 600 ? 1.5 : 2, backgroundColor: null,
     onclone: d => { const el = d.getElementById("sheet"); el.style.width = "780px"; el.style.boxShadow = "none"; } });
-  download("final-schedule.png", canvas.toDataURL("image/png"));
+  const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+  if (!blob) { alert("Couldn't create the image. Take a screenshot instead."); return; }
+  const file = new File([blob], "final-schedule.png", { type: "image/png" });
+  const touch = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (touch && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: "Final exam schedule" }); return; } catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  const url = URL.createObjectURL(blob);
+  if (touch) { window.open(url, "_blank"); return; }   // long-press the image to save
+  download("final-schedule.png", url); setTimeout(() => URL.revokeObjectURL(url), 2000);
 };
 $("ics").onclick = () => {
   const { out } = resolved();
